@@ -1,0 +1,17 @@
+# Rust build
+target/
+*.exe
+*.pdb
+
+# runtime
+config.yml
+logs/
+status.json
+watchdog.pid
+*.flag
+
+# editor / os
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

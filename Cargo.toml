@@ -1,0 +1,37 @@
+[package]
+name = "mumu_alas_watchdog_rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "MuMu 模拟器 + Alas 自动重启看门狗（Rust + egui 重写）"
+license = "Apache-2.0"
+
+[[bin]]
+name = "MuMuAlasWatchdog"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+log = "0.4"
+eframe = "0.31"
+ureq = { version = "2", default-features = false }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
+codegen-units = 1
+
+[dev-dependencies]

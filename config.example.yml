@@ -1,0 +1,99 @@
+# ============================================================================
+# MuMu + Alas 自动重启看门狗 配置示例 (YAML)
+#
+# 首次运行会在同目录生成 config.yml（本文件的副本），然后读取 config.yml。
+# config.yml 已被 .gitignore 忽略，可以放心填写本机路径。
+# 修改 config.yml 后需要重启看门狗（--stop 然后 --start）才生效。
+# 路径建议使用正斜杠 / ；auto 表示自动识别。
+# ============================================================================
+
+paths:
+  # Alas 根目录（包含 alas.py / gui.py）。
+  # auto：优先从运行中的 Alas 进程推断，再尝试与本程序相邻的常见目录。
+  # 如果程序不在 Alas 目录附近，建议直接填写绝对路径，例如:
+  #   alas_root: C:/path/to/AzurLaneAutoScript
+  alas_root: auto
+  # MuMuManager.exe。auto = 从 Alas 配置 / 运行中的 MuMu 进程自动识别。
+  #   mumu_manager: F:/path/to/MuMuPlayer/nx_main/MuMuManager.exe
+  mumu_manager: auto
+  # MuMu 实例编号。auto = 从 Alas 配置的模拟器名 / ADB 端口自动识别。
+  mumu_instance: auto
+  # adb.exe。auto = 读取 Alas deploy.yaml 的 AdbExecutable。
+  adb_exe: auto
+  # electron = 直接启动 toolkit/webapp/alas.exe（推荐）；launcher = 启动 Alas.exe。
+  launch_mode: electron
+
+alas:
+  # 需要自动恢复的 Alas 配置名（对应 config/<名字>.json）。
+  config_names: auto
+
+schedule:
+  # 每天固定时间重启，例如 ["04:00", "16:00"]；为空则按 restart_interval_hours 间隔。
+  restart_times: []
+  restart_interval_hours: 6
+  # 看门狗启动后是否立刻完整重启一次。
+  restart_on_start: false
+  # 启动时若模拟器/Alas 未运行，是否自动拉起。
+  ensure_running_on_start: true
+  # 重启失败后的重试间隔（秒），连续失败自动加倍，最长 1800 秒。
+  retry_delay_seconds: 300
+  # 看门狗启动后第一次计划重启的最小等待（分钟），避免刚启动就重启。
+  startup_grace_minutes: 10
+
+health:
+  # 巡检间隔（秒）。
+  check_interval_seconds: 60
+  # ADB 连续失败多少次后触发完整重启。
+  adb_fail_threshold: 3
+  # 模拟器进程提交内存超过该值提前重启；0 = 关闭。例如 10 表示 10 GB。
+  mumu_memory_limit_gb: 0
+  # 模拟器意外退出时是否自动重启。
+  restart_if_emulator_down: true
+  # Alas 意外退出/崩溃时是否自动重新拉起。
+  restart_alas_if_closed: true
+  # Alas 自动重新拉起的最小间隔（秒）。
+  alas_restart_cooldown_seconds: 600
+  # 当前任务超过多少分钟没有任何新日志视为疑似卡死；0 = 关闭。
+  task_stuck_minutes: 60
+  # 疑似卡死时是否自动完整重启。
+  restart_on_task_stuck: true
+  # 卡死重启的最小间隔（秒）。
+  task_stuck_cooldown_seconds: 3600
+
+timeouts:
+  emulator_shutdown_seconds: 90
+  emulator_boot_seconds: 240
+  adb_ready_seconds: 300
+  alas_start_seconds: 180
+  scheduler_start_seconds: 180
+
+process:
+  # 重启前是否结束 adb server（清除卡死的 ADB 连接）。
+  kill_adb_server: true
+  # 重启 Alas 前写 config/reloadalas，让它自动开始游戏脚本。
+  use_reloadalas: true
+  # 结束 Alas 进程最长等待（秒）。
+  kill_alas_seconds: 30
+
+monitor:
+  # 运行状态日志输出间隔（秒）。
+  status_log_seconds: 300
+  # 是否写 status.json。
+  write_status_json: true
+  # 以下自我监控阈值用于超长时间无人值守：超过阈值且已安装监督者任务时，
+  # 看门狗会记录日志并有序退出，由计划任务（--ensure 每 5 分钟）重新拉起。
+  self_restart_memory_mb: 200
+  self_restart_handles: 1000
+  self_restart_after_hours: 24
+
+logging:
+  # 日志目录（相对路径基于程序所在目录）。
+  dir: logs
+  # 日志保留天数。
+  keep_days: 14
+  # 日志级别: DEBUG / INFO / WARNING / ERROR。
+  level: INFO
+
+advanced:
+  # 单条 MuMuManager 命令超时（秒）。
+  mumu_cmd_timeout_seconds: 90
