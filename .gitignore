@@ -1,0 +1,29 @@
+# virtualenv
+.venv/
+
+# python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# build artifacts
+build/
+dist/
+*.spec.bak
+*.exe
+
+# runtime data
+logs/
+status.json
+watchdog.pid
+*.flag
+*.log
+config.yml
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
