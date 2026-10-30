@@ -85,7 +85,10 @@ fn as_string(value: Option<&Value>, default: &str) -> String {
 fn as_bool(value: Option<&Value>, default: bool) -> bool {
     match value {
         Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => matches!(text.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Some(Value::String(text)) => matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Some(Value::Number(number)) => number.as_i64().map(|n| n != 0).unwrap_or(default),
         _ => default,
     }
@@ -120,12 +123,18 @@ impl Settings {
                 fs::create_dir_all(parent).map_err(|err| format!("创建配置目录失败: {err}"))?;
             }
             let example = constants::config_example_path();
-            let text = fs::read_to_string(&example).unwrap_or_else(|_| DEFAULT_CONFIG_TEXT.to_string());
+            let text =
+                fs::read_to_string(&example).unwrap_or_else(|_| DEFAULT_CONFIG_TEXT.to_string());
             fs::write(path, text).map_err(|err| format!("写入配置失败: {err}"))?;
             created = true;
         }
         let text = fs::read_to_string(path).map_err(|err| format!("读取配置失败: {err}"))?;
-        let raw: Value = serde_yaml::from_str(&text).map_err(|err| format!("config.yml 解析失败: {err}"))?;
+        Self::from_text(path, &text, created)
+    }
+
+    pub(crate) fn from_text(path: &Path, text: &str, created: bool) -> Result<Settings, String> {
+        let raw: Value =
+            serde_yaml::from_str(text).map_err(|err| format!("config.yml 解析失败: {err}"))?;
         if !raw.is_mapping() {
             return Err("config.yml 顶层必须是映射（key: value）".to_string());
         }
@@ -134,7 +143,8 @@ impl Settings {
         let mumu_manager = as_string(mapping_get(&raw, &["paths", "mumu_manager"]), "auto");
         let adb_exe = as_string(mapping_get(&raw, &["paths", "adb_exe"]), "auto");
         let launch_mode = {
-            let mode = as_string(mapping_get(&raw, &["paths", "launch_mode"]), "electron").to_ascii_lowercase();
+            let mode = as_string(mapping_get(&raw, &["paths", "launch_mode"]), "electron")
+                .to_ascii_lowercase();
             if mode == "launcher" {
                 "launcher".to_string()
             } else {
@@ -207,37 +217,96 @@ impl Settings {
             launch_mode,
             config_names,
             restart_times,
-            restart_interval_hours: as_f64(mapping_get(&raw, &["schedule", "restart_interval_hours"]), 6.0).max(0.1),
+            restart_interval_hours: as_f64(
+                mapping_get(&raw, &["schedule", "restart_interval_hours"]),
+                6.0,
+            )
+            .max(0.1),
             restart_on_start: as_bool(mapping_get(&raw, &["schedule", "restart_on_start"]), false),
-            ensure_running_on_start: as_bool(mapping_get(&raw, &["schedule", "ensure_running_on_start"]), true),
-            retry_delay: as_u64(mapping_get(&raw, &["schedule", "retry_delay_seconds"]), 300).max(30),
-            startup_grace_minutes: as_i64(mapping_get(&raw, &["schedule", "startup_grace_minutes"]), 10).max(0),
-            check_interval: as_u64(mapping_get(&raw, &["health", "check_interval_seconds"]), 60).max(20),
-            adb_fail_threshold: as_u64(mapping_get(&raw, &["health", "adb_fail_threshold"]), 3).max(2) as u32,
-            mumu_memory_limit_gb: as_f64(mapping_get(&raw, &["health", "mumu_memory_limit_gb"]), 0.0).max(0.0),
-            restart_if_emulator_down: as_bool(mapping_get(&raw, &["health", "restart_if_emulator_down"]), true),
-            restart_alas_if_closed: as_bool(mapping_get(&raw, &["health", "restart_alas_if_closed"]), true),
-            alas_restart_cooldown: as_i64(mapping_get(&raw, &["health", "alas_restart_cooldown_seconds"]), 600).max(60),
-            task_stuck_minutes: as_i64(mapping_get(&raw, &["health", "task_stuck_minutes"]), 60).max(0),
-            restart_on_task_stuck: as_bool(mapping_get(&raw, &["health", "restart_on_task_stuck"]), true),
-            task_stuck_cooldown: as_i64(mapping_get(&raw, &["health", "task_stuck_cooldown_seconds"]), 3600).max(300),
-            emulator_shutdown_timeout: as_u64(mapping_get(&raw, &["timeouts", "emulator_shutdown_seconds"]), 90),
-            emulator_boot_timeout: as_u64(mapping_get(&raw, &["timeouts", "emulator_boot_seconds"]), 240),
+            ensure_running_on_start: as_bool(
+                mapping_get(&raw, &["schedule", "ensure_running_on_start"]),
+                true,
+            ),
+            retry_delay: as_u64(mapping_get(&raw, &["schedule", "retry_delay_seconds"]), 300)
+                .max(30),
+            startup_grace_minutes: as_i64(
+                mapping_get(&raw, &["schedule", "startup_grace_minutes"]),
+                10,
+            )
+            .max(0),
+            check_interval: as_u64(mapping_get(&raw, &["health", "check_interval_seconds"]), 60)
+                .max(20),
+            adb_fail_threshold: as_u64(mapping_get(&raw, &["health", "adb_fail_threshold"]), 3)
+                .max(2) as u32,
+            mumu_memory_limit_gb: as_f64(
+                mapping_get(&raw, &["health", "mumu_memory_limit_gb"]),
+                0.0,
+            )
+            .max(0.0),
+            restart_if_emulator_down: as_bool(
+                mapping_get(&raw, &["health", "restart_if_emulator_down"]),
+                true,
+            ),
+            restart_alas_if_closed: as_bool(
+                mapping_get(&raw, &["health", "restart_alas_if_closed"]),
+                true,
+            ),
+            alas_restart_cooldown: as_i64(
+                mapping_get(&raw, &["health", "alas_restart_cooldown_seconds"]),
+                600,
+            )
+            .max(60),
+            task_stuck_minutes: as_i64(mapping_get(&raw, &["health", "task_stuck_minutes"]), 60)
+                .max(0),
+            restart_on_task_stuck: as_bool(
+                mapping_get(&raw, &["health", "restart_on_task_stuck"]),
+                true,
+            ),
+            task_stuck_cooldown: as_i64(
+                mapping_get(&raw, &["health", "task_stuck_cooldown_seconds"]),
+                3600,
+            )
+            .max(300),
+            emulator_shutdown_timeout: as_u64(
+                mapping_get(&raw, &["timeouts", "emulator_shutdown_seconds"]),
+                90,
+            ),
+            emulator_boot_timeout: as_u64(
+                mapping_get(&raw, &["timeouts", "emulator_boot_seconds"]),
+                240,
+            ),
             adb_ready_timeout: as_u64(mapping_get(&raw, &["timeouts", "adb_ready_seconds"]), 300),
             alas_start_timeout: as_u64(mapping_get(&raw, &["timeouts", "alas_start_seconds"]), 180),
-            scheduler_start_timeout: as_u64(mapping_get(&raw, &["timeouts", "scheduler_start_seconds"]), 180),
+            scheduler_start_timeout: as_u64(
+                mapping_get(&raw, &["timeouts", "scheduler_start_seconds"]),
+                180,
+            ),
             kill_adb_server: as_bool(mapping_get(&raw, &["process", "kill_adb_server"]), true),
             use_reloadalas: as_bool(mapping_get(&raw, &["process", "use_reloadalas"]), true),
-            kill_alas_timeout: as_u64(mapping_get(&raw, &["process", "kill_alas_seconds"]), 30).max(5),
-            status_log_seconds: as_u64(mapping_get(&raw, &["monitor", "status_log_seconds"]), 300).max(30),
+            kill_alas_timeout: as_u64(mapping_get(&raw, &["process", "kill_alas_seconds"]), 30)
+                .max(5),
+            status_log_seconds: as_u64(mapping_get(&raw, &["monitor", "status_log_seconds"]), 300)
+                .max(30),
             write_status_json: as_bool(mapping_get(&raw, &["monitor", "write_status_json"]), true),
-            self_restart_memory_mb: as_u64(mapping_get(&raw, &["monitor", "self_restart_memory_mb"]), 0),
-            self_restart_handles: as_u64(mapping_get(&raw, &["monitor", "self_restart_handles"]), 0) as u32,
-            self_restart_after_hours: as_u64(mapping_get(&raw, &["monitor", "self_restart_after_hours"]), 0),
+            self_restart_memory_mb: as_u64(
+                mapping_get(&raw, &["monitor", "self_restart_memory_mb"]),
+                0,
+            ),
+            self_restart_handles: as_u64(mapping_get(&raw, &["monitor", "self_restart_handles"]), 0)
+                as u32,
+            self_restart_after_hours: as_u64(
+                mapping_get(&raw, &["monitor", "self_restart_after_hours"]),
+                0,
+            ),
             log_dir: log_dir_path,
             keep_days: as_u64(mapping_get(&raw, &["logging", "keep_days"]), 14).max(1) as u32,
-            log_level: as_string(mapping_get(&raw, &["logging", "level"]), "INFO").to_ascii_uppercase(),
-            mumu_cmd_timeout: as_u64(mapping_get(&raw, &["advanced", "mumu_cmd_timeout_seconds"]), 90).max(20),
+            log_level: as_string(mapping_get(&raw, &["logging", "level"]), "INFO")
+                .to_ascii_uppercase(),
+            mumu_cmd_timeout: as_u64(
+                mapping_get(&raw, &["advanced", "mumu_cmd_timeout_seconds"]),
+                90,
+            )
+            .max(20),
         })
     }
 }

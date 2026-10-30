@@ -18,9 +18,13 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
 eframe = "0.31"
+rfd = "0.16"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+memmap2 = "0.9"
 ureq = { version = "2", default-features = false }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
@@ -38,3 +42,6 @@ strip = true
 codegen-units = 1
 
 [dev-dependencies]
+
+[build-dependencies]
+embed-resource = "3"

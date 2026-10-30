@@ -57,7 +57,7 @@ struct Cli {
     /// 移除开机自启
     #[arg(long = "uninstall-autostart")]
     uninstall_autostart: bool,
-    /// 安装监督者计划任务（每 5 分钟 --ensure）
+    /// 安装监督者计划任务（每 2 分钟 --ensure）
     #[arg(long = "install-supervisor")]
     install_supervisor: bool,
     /// 移除监督者计划任务
@@ -72,9 +72,7 @@ struct Cli {
 }
 
 fn load_settings(config: &Option<PathBuf>) -> Result<Settings, String> {
-    let path = config
-        .clone()
-        .unwrap_or_else(constants::config_path);
+    let path = config.clone().unwrap_or_else(constants::config_path);
     Settings::load(&path)
 }
 
@@ -99,7 +97,9 @@ fn spawn_daemon(config: &Option<PathBuf>) -> Result<u32, String> {
     .map_err(|err| format!("启动后台进程失败: {err}"))?;
     match util::wait_pid_file(&constants::pid_file(), Duration::from_secs(10)) {
         Some(watcher_pid) => Ok(watcher_pid),
-        None => Err(format!("后台进程已创建（PID {pid}），但未检测到 watchdog.pid")),
+        None => Err(format!(
+            "后台进程已创建（PID {pid}），但未检测到 watchdog.pid"
+        )),
     }
 }
 
@@ -180,6 +180,7 @@ fn cmd_restart_now(config: &Option<PathBuf>) -> Result<bool, String> {
         outln!("检测到看门狗正在运行，已通知它执行完整重启（详见日志目录）");
         return Ok(true);
     }
+    let _control = acquire_control()?;
     let settings = load_settings(config)?;
     init_logger(&settings);
     let mut watchdog = Watchdog::new(settings)?;
@@ -193,6 +194,7 @@ fn cmd_restart_alas_now(config: &Option<PathBuf>) -> Result<bool, String> {
         outln!("检测到看门狗正在运行，已通知它重启 Alas（不重启模拟器）");
         return Ok(true);
     }
+    let _control = acquire_control()?;
     let settings = load_settings(config)?;
     init_logger(&settings);
     let mut watchdog = Watchdog::new(settings)?;
@@ -209,10 +211,17 @@ fn cmd_restart_alas_now(config: &Option<PathBuf>) -> Result<bool, String> {
     Ok(watchdog.restart_alas_only("命令行手动请求"))
 }
 
-fn cmd_test_emulator(config: &Option<PathBuf>, index: u32, keep_running: bool) -> Result<bool, String> {
+fn cmd_test_emulator(
+    config: &Option<PathBuf>,
+    index: u32,
+    keep_running: bool,
+) -> Result<bool, String> {
     if let Some(pid) = util::watcher_running_pid() {
-        return Err(format!("看门狗正在运行（PID {pid}），请先执行 --stop 再测试"));
+        return Err(format!(
+            "看门狗正在运行（PID {pid}），请先执行 --stop 再测试"
+        ));
     }
+    let _control = acquire_control()?;
     let settings = load_settings(config)?;
     init_logger(&settings);
     let layout = crate::layout::detect_layout(&settings)?;
@@ -239,19 +248,32 @@ fn cmd_test_emulator(config: &Option<PathBuf>, index: u32, keep_running: bool) -
                 let info = emulator.launch()?;
                 outln!(
                     "启动完成: name={} pid={} adb_port={} state={}",
-                    info.get("name").and_then(|value| value.as_str()).unwrap_or("?"),
-                    info.get("pid").and_then(|value| value.as_u64()).unwrap_or(0),
-                    info.get("adb_port").and_then(|value| value.as_u64()).unwrap_or(0),
-                    info.get("player_state").and_then(|value| value.as_str()).unwrap_or("?")
+                    info.get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?"),
+                    info.get("pid")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    info.get("adb_port")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    info.get("player_state")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?")
                 );
             }
         }
         emulator.wait_adb_ready()?;
         outln!("ADB 正常: {}", emulator.serial);
-        outln!("adb state = {}, sys.boot_completed = {}", emulator.adb_state(), {
-            let boot = emulator.adb_shell(&["getprop", "sys.boot_completed"], Duration::from_secs(15));
-            boot.stdout.trim().to_string()
-        });
+        outln!(
+            "adb state = {}, sys.boot_completed = {}",
+            emulator.adb_state(),
+            {
+                let boot =
+                    emulator.adb_shell(&["getprop", "sys.boot_completed"], Duration::from_secs(15));
+                boot.stdout.trim().to_string()
+            }
+        );
         Ok(())
     })();
     if !keep_running {
@@ -273,6 +295,16 @@ fn cmd_test_emulator(config: &Option<PathBuf>, index: u32, keep_running: bool) -
             Ok(false)
         }
     }
+}
+
+/// Standalone CLI operations share the daemon's lock as they control the same apps.
+fn acquire_control() -> Result<crate::instance::InstanceGuard, String> {
+    let guard = crate::instance::InstanceGuard::acquire("watchdog")?
+        .ok_or_else(|| "看门狗或另一项控制操作正在启动/执行，请稍后重试".to_owned())?;
+    if util::watcher_running_pid().is_some() {
+        return Err("看门狗正在运行，请通过其控制命令操作".into());
+    }
+    Ok(guard)
 }
 
 fn attach_console_if_needed() {
@@ -318,7 +350,7 @@ pub fn run() -> i32 {
         return match crate::integrations::install_supervisor() {
             Ok(()) => {
                 outln!(
-                    "已安装监督者计划任务「{}」（每 5 分钟执行 --ensure）",
+                    "已安装监督者计划任务「{}」（每 2 分钟执行 --ensure）",
                     constants::SUPERVISOR_TASK_NAME
                 );
                 0

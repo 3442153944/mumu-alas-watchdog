@@ -197,8 +197,14 @@ pub fn format_lines(status: &Json, next_restart: Option<DateTime<Local>>) -> Vec
         .pointer("/watchdog/self_handles")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
+    let self_cpu = status
+        .pointer("/watchdog/self_cpu_pct_one_core")
+        .and_then(|value| value.as_f64());
+    let cpu_text = self_cpu
+        .map(|pct| format!(" / CPU {pct:.2}%"))
+        .unwrap_or_default();
     lines.push(format!(
-        "[状态] 看门狗自身: WS {self_ws:.1} MB / Handles {self_handles} | 计划: {}",
+        "[状态] 看门狗自身: WS {self_ws:.1} MB / Handles {self_handles}{cpu_text} | 计划: {}",
         next_restart
             .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
             .unwrap_or_else(|| "尚未安排".to_string())

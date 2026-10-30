@@ -9,6 +9,13 @@ logs/
 status.json
 watchdog.pid
 *.flag
+reload-config.json
+reload-result.json
+reload-config.*.tmp
+reload-result.*.tmp
+*.yml.bak
+gui-appearance.json
+gui-appearance.*.tmp
 
 # editor / os
 .idea/

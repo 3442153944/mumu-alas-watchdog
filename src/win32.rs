@@ -152,6 +152,32 @@ pub fn self_handle_count() -> u32 {
     }
 }
 
+fn filetime_ticks(value: FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+/// 当前进程累计 CPU 时间（秒，kernel + user）。
+pub fn self_cpu_seconds() -> Option<f64> {
+    unsafe {
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        ) != 0;
+        if !ok {
+            return None;
+        }
+        let ticks = filetime_ticks(kernel) + filetime_ticks(user);
+        Some(ticks as f64 / 10_000_000.0)
+    }
+}
+
 /// 进程创建时间（本地时间）。
 pub fn proc_create_time(pid: u32) -> Option<DateTime<Local>> {
     unsafe {

@@ -45,6 +45,9 @@ pub struct Watchdog {
     started_at: DateTime<Local>,
     supervisor_installed: bool,
     self_restart_warned: bool,
+    mumu_info_at: Option<Instant>,
+    cpu_sample: Option<(Instant, f64)>,
+    cpu_pct_one_core: Option<f64>,
 }
 
 impl Watchdog {
@@ -79,6 +82,9 @@ impl Watchdog {
             started_at: Local::now(),
             supervisor_installed: false,
             self_restart_warned: false,
+            mumu_info_at: None,
+            cpu_sample: crate::win32::self_cpu_seconds().map(|cpu| (Instant::now(), cpu)),
+            cpu_pct_one_core: None,
         };
         watchdog.supervisor_installed = supervisor_installed();
         watchdog.refresh_emulator_runtime();
@@ -99,6 +105,7 @@ impl Watchdog {
     }
 
     fn remember_emulator(&mut self, info: &Json) {
+        self.mumu_info_at = Some(Instant::now());
         if let Some(pid) = info.get("pid").and_then(|value| value.as_u64()) {
             self.emulator.last_pid = Some(pid as u32);
             if let Some(created) = crate::win32::proc_create_time(pid as u32) {
@@ -107,6 +114,40 @@ impl Watchdog {
         }
         if let Some(name) = info.get("name").and_then(|value| value.as_str()) {
             self.layout.instance_name = Some(name.to_string());
+        }
+    }
+
+    /// MuMuManager 单次查询实测要 100~220ms CPU，不能每分钟都跑：
+    /// 平时靠缓存的 PID 做轻量存活检查，只有进程丢失或到达状态采集周期才重新查询。
+    fn mumu_info_due(&self) -> bool {
+        let refresh_every = self.settings.status_log_seconds.max(60);
+        let due = self
+            .mumu_info_at
+            .map(|at| at.elapsed() >= Duration::from_secs(refresh_every))
+            .unwrap_or(true);
+        if due {
+            return true;
+        }
+        match self.emulator.last_pid {
+            Some(pid) => !crate::win32::is_pid_alive(pid),
+            None => true,
+        }
+    }
+
+    fn update_cpu_sample(&mut self) {
+        let Some((then, then_cpu)) = self.cpu_sample else {
+            self.cpu_sample = crate::win32::self_cpu_seconds().map(|cpu| (Instant::now(), cpu));
+            return;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(then).as_secs_f64();
+        if elapsed < 2.0 {
+            return;
+        }
+        if let Some(cpu) = crate::win32::self_cpu_seconds() {
+            let pct = ((cpu - then_cpu) / elapsed * 100.0 * 100.0).round() / 100.0;
+            self.cpu_pct_one_core = Some(pct);
+            self.cpu_sample = Some((now, cpu));
         }
     }
 
@@ -165,7 +206,10 @@ impl Watchdog {
                     "reason": reason,
                     "duration_seconds": started.elapsed().as_secs(),
                 }));
-                log::info!("[重启] 完整重启成功，用时 {}", util::fmt_duration(started.elapsed().as_secs_f64()));
+                log::info!(
+                    "[重启] 完整重启成功，用时 {}",
+                    util::fmt_duration(started.elapsed().as_secs_f64())
+                );
             }
             Err(err) => {
                 log::error!("[重启] 失败: {err}");
@@ -207,7 +251,10 @@ impl Watchdog {
             Ok(()) => {
                 self.failures = 0;
                 self.logwatch.note_scheduler_started();
-                log::info!("[重启] Alas 重启成功，用时 {}", util::fmt_duration(started.elapsed().as_secs_f64()));
+                log::info!(
+                    "[重启] Alas 重启成功，用时 {}",
+                    util::fmt_duration(started.elapsed().as_secs_f64())
+                );
                 self.log_status_snapshot();
                 true
             }
@@ -267,37 +314,55 @@ impl Watchdog {
     fn health_check(&mut self) {
         let texts = self.logwatch.scan();
         self.logwatch.analyze(&texts);
+        self.update_cpu_sample();
 
-        let info = match self.emulator.info(None) {
-            Ok(info) => {
-                self.mumu_fail = 0;
-                info
+        if self.mumu_info_due() {
+            match self.emulator.info(None) {
+                Ok(info) => {
+                    self.mumu_fail = 0;
+                    if !Emulator::is_running(&info) {
+                        self.emulator_missing += 1;
+                        log::warn!(
+                            "[巡检] 检测到 MuMu 实例未运行（{}/2）",
+                            self.emulator_missing
+                        );
+                        if self.emulator_missing >= 2 && self.settings.restart_if_emulator_down {
+                            self.pending_full_cycle = Some("模拟器未运行".to_string());
+                        }
+                        return;
+                    }
+                    self.emulator_missing = 0;
+                    self.remember_emulator(&info);
+                }
+                Err(err) => {
+                    self.mumu_fail += 1;
+                    log::warn!(
+                        "[巡检] MuMu 信息查询失败（{}/{}）: {err}",
+                        self.mumu_fail,
+                        self.settings.adb_fail_threshold
+                    );
+                    if self.mumu_fail >= self.settings.adb_fail_threshold
+                        && self.settings.restart_if_emulator_down
+                    {
+                        self.pending_full_cycle = Some("MuMu 控制接口无响应".to_string());
+                    }
+                    return;
+                }
             }
-            Err(err) => {
-                self.mumu_fail += 1;
-                log::warn!(
-                    "[巡检] MuMu 信息查询失败（{}/{}）: {err}",
-                    self.mumu_fail,
-                    self.settings.adb_fail_threshold
-                );
-                if self.mumu_fail >= self.settings.adb_fail_threshold
-                    && self.settings.restart_if_emulator_down
-                {
-                    self.pending_full_cycle = Some("MuMu 控制接口无响应".to_string());
+        } else if let Some(pid) = self.emulator.last_pid {
+            // 轻量存活检查，避免每分钟启动 MuMuManager（单次约 0.1~0.2s CPU）。
+            if !crate::win32::is_pid_alive(pid) {
+                self.emulator_missing += 1;
+                log::warn!("[巡检] MuMu 进程已退出（{}/2）", self.emulator_missing);
+                if self.emulator_missing >= 2 && self.settings.restart_if_emulator_down {
+                    self.pending_full_cycle = Some("模拟器进程已退出".to_string());
                 }
                 return;
             }
-        };
-        if !Emulator::is_running(&info) {
-            self.emulator_missing += 1;
-            log::warn!("[巡检] 检测到 MuMu 实例未运行（{}/2）", self.emulator_missing);
-            if self.emulator_missing >= 2 && self.settings.restart_if_emulator_down {
-                self.pending_full_cycle = Some("模拟器未运行".to_string());
-            }
+            self.emulator_missing = 0;
+        } else {
             return;
         }
-        self.emulator_missing = 0;
-        self.remember_emulator(&info);
 
         if self.settings.mumu_memory_limit_gb > 0.0 {
             if let Some((_working_set, commit_gb)) = self.emulator.memory_usage() {
@@ -320,10 +385,15 @@ impl Watchdog {
                 "[巡检] ADB 连接异常（{}/{}），当前: {}（{} ms）",
                 self.adb_fail,
                 self.settings.adb_fail_threshold,
-                if state.is_empty() { "无响应" } else { &state },
+                if state.is_empty() {
+                    "无响应"
+                } else {
+                    &state
+                },
                 adb_ms
             );
-            self.emulator.adb(&["connect", &self.emulator.serial], Duration::from_secs(30));
+            self.emulator
+                .adb(&["connect", &self.emulator.serial], Duration::from_secs(30));
             if self.adb_fail >= self.settings.adb_fail_threshold {
                 self.pending_full_cycle = Some("ADB 连接丢失".to_string());
             }
@@ -403,7 +473,8 @@ impl Watchdog {
                 .map(|next| now >= next)
                 .unwrap_or(true);
             if allowed {
-                self.pending_full_cycle = Some(format!("任务 {task} 疑似卡死（{idle_minutes} 分钟无日志）"));
+                self.pending_full_cycle =
+                    Some(format!("任务 {task} 疑似卡死（{idle_minutes} 分钟无日志）"));
                 self.next_stuck_trigger_at =
                     Some(now + chrono::Duration::seconds(self.settings.task_stuck_cooldown));
             }
@@ -413,6 +484,99 @@ impl Watchdog {
     // ------------------------------------------------------------------
     // 控制文件 / 主循环
     // ------------------------------------------------------------------
+    pub fn reload_config(&mut self) -> Result<(), String> {
+        let settings = crate::reload::read_settings(&self.settings.path)?;
+        let layout = detect_layout(&settings)?;
+        let same_target = self.layout.alas_root == layout.alas_root
+            && self.layout.mumu_manager == layout.mumu_manager
+            && self.layout.instance == layout.instance
+            && self.layout.configs == layout.configs
+            && self.layout.serial == layout.serial;
+        // Prepare every dependent object before committing. No stop/launch calls.
+        let mut emulator = Emulator::new(&settings, &layout);
+        let alas = Alas::new(settings.clone(), layout.clone());
+        let logwatch = if same_target {
+            None
+        } else {
+            Some(LogWatcher::new(&settings, &layout))
+        };
+        logger::reconfigure(&settings.log_dir, &settings.log_level, settings.keep_days)?;
+        if same_target {
+            emulator.last_pid = self.emulator.last_pid;
+        }
+        self.settings = settings;
+        self.layout = layout;
+        self.emulator = emulator;
+        self.alas = alas;
+        if let Some(logwatch) = logwatch {
+            self.logwatch = logwatch;
+            self.emulator_start_time = None;
+            self.adb_fail = 0;
+            self.emulator_missing = 0;
+            self.mumu_fail = 0;
+            self.alas_missing = 0;
+            self.pending_full_cycle = None;
+            self.pending_alas_restart = None;
+            self.retry_at = None;
+            self.next_alas_restart_at = None;
+            self.next_stuck_trigger_at = None;
+            self.failures = 0;
+        }
+        self.refresh_emulator_runtime();
+        let now = Local::now();
+        self.next_restart = Some(
+            schedule::apply_startup_grace(
+                self.compute_next_restart(now),
+                now,
+                self.settings.startup_grace_minutes,
+            )
+            .0,
+        );
+        self.next_health =
+            Some(now + chrono::Duration::seconds(self.settings.check_interval as i64));
+        self.next_status_log =
+            Some(now + chrono::Duration::seconds(self.settings.status_log_seconds as i64));
+        log::info!("[配置] 热重载成功，计划已重算；未执行启动时重启");
+        let payload = self.collect_status();
+        status::write_status(&self.settings, &payload);
+        Ok(())
+    }
+
+    fn handle_reload(&mut self) {
+        let path = crate::reload::request_path();
+        let Ok(text) = fs::read_to_string(&path) else {
+            return;
+        };
+        let _ = fs::remove_file(path);
+        let Ok(request) = serde_json::from_str::<crate::reload::Request>(&text) else {
+            log::warn!("[配置] 无效的热重载请求");
+            return;
+        };
+        let result = if request.pid != std::process::id() {
+            Err("看门狗进程已变化，请重新请求热重载".into())
+        } else if !same_config_path(&request.path, &self.settings.path) {
+            Err("后台使用另一份配置，不能热重载此文件".into())
+        } else {
+            self.reload_config()
+        };
+        let ok = result.is_ok();
+        let message = result
+            .err()
+            .unwrap_or_else(|| "后台热重载成功，配置已生效".into());
+        if !ok {
+            log::error!("[配置] 热重载失败，保留原配置：{message}");
+        }
+        let reply = crate::reload::Reply {
+            id: request.id,
+            pid: std::process::id(),
+            ok,
+            message,
+        };
+        if let Err(err) = crate::reload::write_json(&crate::reload::reply_path(), &reply) {
+            log::error!("[配置] 写入重载结果失败：{err}");
+        }
+    }
+
     fn handle_flags(&mut self) {
         if constants::flag_stop().exists() {
             let _ = fs::remove_file(constants::flag_stop());
@@ -420,6 +584,7 @@ impl Watchdog {
             self.stop_requested = true;
             return;
         }
+        self.handle_reload();
         if constants::flag_full_restart().exists() {
             let _ = fs::remove_file(constants::flag_full_restart());
             self.pending_full_cycle = Some("手动请求完整重启".to_string());
@@ -440,6 +605,9 @@ impl Watchdog {
     fn tick(&mut self) {
         let now = Local::now();
         self.handle_flags();
+        if self.stop_requested {
+            return;
+        }
 
         if let Some(reason) = self.pending_full_cycle.take() {
             if self.run_full_cycle(&reason) {
@@ -467,11 +635,13 @@ impl Watchdog {
                 return;
             }
             if self.restart_alas_only(&reason) {
-                self.next_alas_restart_at =
-                    Some(Local::now() + chrono::Duration::seconds(self.settings.alas_restart_cooldown));
+                self.next_alas_restart_at = Some(
+                    Local::now() + chrono::Duration::seconds(self.settings.alas_restart_cooldown),
+                );
             } else {
-                self.retry_at =
-                    Some(Local::now() + chrono::Duration::seconds(self.settings.retry_delay as i64));
+                self.retry_at = Some(
+                    Local::now() + chrono::Duration::seconds(self.settings.retry_delay as i64),
+                );
             }
             return;
         }
@@ -493,7 +663,8 @@ impl Watchdog {
         }
 
         if self.next_health.map(|next| now >= next).unwrap_or(true) {
-            self.next_health = Some(now + chrono::Duration::seconds(self.settings.check_interval as i64));
+            self.next_health =
+                Some(now + chrono::Duration::seconds(self.settings.check_interval as i64));
             self.health_check();
         }
 
@@ -549,7 +720,7 @@ impl Watchdog {
     // 状态输出
     // ------------------------------------------------------------------
     pub fn collect_status(&self) -> Json {
-        status::build_status(
+        let mut payload = status::build_status(
             &self.settings,
             &self.layout,
             &self.emulator,
@@ -560,7 +731,11 @@ impl Watchdog {
             self.failures,
             &self.last_cycle,
             self.started_at,
-        )
+        );
+        if let Some(pct) = self.cpu_pct_one_core {
+            payload["watchdog"]["self_cpu_pct_one_core"] = json!(pct);
+        }
+        payload
     }
 
     pub fn write_status_json(&self) {
@@ -568,6 +743,7 @@ impl Watchdog {
     }
 
     pub fn log_status_snapshot(&mut self) {
+        self.update_cpu_sample();
         let payload = self.collect_status();
         for line in status::format_lines(&payload, self.next_restart) {
             if line.contains("查询失败") {
@@ -577,6 +753,16 @@ impl Watchdog {
             }
         }
         status::write_status(&self.settings, &payload);
+        // 状态采集已经查询过 MuMu；同步缓存，避免巡检重复调用 MuMuManager。
+        if payload.pointer("/emulator/error").is_none() {
+            self.mumu_info_at = Some(Instant::now());
+            if let Some(pid) = payload.pointer("/emulator/pid").and_then(|value| value.as_u64()) {
+                self.emulator.last_pid = Some(pid as u32);
+                if self.emulator_start_time.is_none() {
+                    self.emulator_start_time = crate::win32::proc_create_time(pid as u32);
+                }
+            }
+        }
         let tip = format!(
             "MuMu + Alas 看门狗（运行中） | 下次重启: {}",
             self.next_restart
@@ -642,15 +828,17 @@ impl Watchdog {
 
     fn log_emulator_memory(&self, tag: &str) {
         if let Some((working_set, commit)) = self.emulator.memory_usage() {
-            log::info!(
-                "[{tag}] MuMu 内存: 工作集 {working_set:.2} GB, 提交 {commit:.2} GB"
-            );
+            log::info!("[{tag}] MuMu 内存: 工作集 {working_set:.2} GB, 提交 {commit:.2} GB");
         }
     }
 
     pub fn print_layout(&self) {
         log::info!("{}", "-".repeat(70));
-        log::info!("{} v{}（Rust/egui）", constants::APP_NAME, constants::VERSION);
+        log::info!(
+            "{} v{}（Rust/egui）",
+            constants::APP_NAME,
+            constants::VERSION
+        );
         log::info!("[配置] {}", self.settings.path.display());
         log::info!("[路径] Alas: {}", self.layout.alas_root.display());
         log::info!("[路径] MuMuManager: {}", self.layout.mumu_manager.display());
@@ -677,7 +865,10 @@ impl Watchdog {
             self.settings.keep_days
         );
         if self.settings.restart_times.is_empty() {
-            log::info!("[计划] 每 {} 小时执行完整重启", self.settings.restart_interval_hours);
+            log::info!(
+                "[计划] 每 {} 小时执行完整重启",
+                self.settings.restart_interval_hours
+            );
         } else {
             let times: Vec<String> = self
                 .settings
@@ -692,7 +883,10 @@ impl Watchdog {
 
     pub fn print_status(&self) {
         outln!("{}", "=".repeat(78));
-        outln!("MuMuAlasWatchdog(Rust)  状态检查    时间: {}", util::now_text());
+        outln!(
+            "MuMuAlasWatchdog(Rust)  状态检查    时间: {}",
+            util::now_text()
+        );
         outln!("{}", "=".repeat(78));
         outln!(
             "看门狗进程: {}",
@@ -767,9 +961,7 @@ impl Watchdog {
 
         outln!("{}", "-".repeat(78));
         outln!("[ADB]");
-        let devices = self
-            .emulator
-            .adb(&["devices"], Duration::from_secs(20));
+        let devices = self.emulator.adb(&["devices"], Duration::from_secs(20));
         for line in devices.stdout.lines() {
             outln!("  {line}");
         }
@@ -777,7 +969,11 @@ impl Watchdog {
         outln!(
             "  serial {} 状态: {}（响应 {} ms）",
             self.emulator.serial,
-            if state.is_empty() { "无响应" } else { &state },
+            if state.is_empty() {
+                "无响应"
+            } else {
+                &state
+            },
             response_ms
         );
         let boot = self
@@ -802,7 +998,10 @@ impl Watchdog {
             webui_ms
         );
         let task_dict = self.logwatch.status_dict();
-        match task_dict.get("current_task").and_then(|value| value.as_str()) {
+        match task_dict
+            .get("current_task")
+            .and_then(|value| value.as_str())
+        {
             Some(task) => outln!(
                 "  当前任务: {task}（开始于 {}，最近日志 {}）",
                 task_dict
@@ -824,7 +1023,10 @@ impl Watchdog {
         outln!("{}", "-".repeat(78));
         outln!("[计划]");
         if self.settings.restart_times.is_empty() {
-            outln!("  重启模式: 每 {} 小时", self.settings.restart_interval_hours);
+            outln!(
+                "  重启模式: 每 {} 小时",
+                self.settings.restart_interval_hours
+            );
         } else {
             let times: Vec<String> = self
                 .settings
@@ -897,17 +1099,22 @@ pub fn supervisor_installed() -> bool {
 }
 
 pub fn run_daemon(settings: Settings) -> Result<(), String> {
-    for path in [
-        constants::flag_stop(),
-        constants::flag_full_restart(),
-        constants::flag_alas_restart(),
-    ] {
-        let _ = fs::remove_file(path);
-    }
+    let Some(_instance) = crate::instance::InstanceGuard::acquire("watchdog")? else {
+        outln!("看门狗已在运行，本次不重复启动");
+        return Ok(());
+    };
     let Some(lock) = acquire_pid_lock()? else {
         outln!("MuMuAlasWatchdog 已经在运行，本次不重复启动");
         return Ok(());
     };
+    for path in [
+        constants::flag_stop(),
+        constants::flag_full_restart(),
+        constants::flag_alas_restart(),
+        crate::reload::request_path(),
+    ] {
+        let _ = fs::remove_file(path);
+    }
     let mut tray = match crate::tray::Tray::start("MuMu + Alas 看门狗（运行中）") {
         Ok(tray) => Some(tray),
         Err(err) => {
@@ -925,4 +1132,66 @@ pub fn run_daemon(settings: Settings) -> Result<(), String> {
     }
     release_pid_lock(Some(lock));
     result
+}
+
+fn same_config_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    #[test]
+    fn reload_changes_live_settings_without_startup_actions_and_rolls_back_errors() {
+        // Empty executable fixtures fail read-only queries immediately. They cannot
+        // launch an emulator, ADB or Alas, and no real application paths are used.
+        let root = std::env::temp_dir().join(format!("muw-live-reload-{}", std::process::id()));
+        fs::create_dir_all(root.join("config")).unwrap();
+        for name in ["alas.py", "gui.py", "Alas.exe", "manager.exe", "adb.exe"] {
+            fs::write(root.join(name), "").unwrap();
+        }
+        fs::write(root.join("config/alas.json"), "{}").unwrap();
+        fs::write(
+            root.join("config/deploy.yaml"),
+            "Deploy:\n  Webui:\n    WebuiPort: 9\n",
+        )
+        .unwrap();
+        let path = root.join("config.yml");
+        let mut raw: serde_yaml::Value =
+            serde_yaml::from_str(crate::config::DEFAULT_CONFIG_TEXT).unwrap();
+        raw["paths"]["alas_root"] = serde_yaml::to_value(&root).unwrap();
+        raw["paths"]["mumu_manager"] = serde_yaml::to_value(root.join("manager.exe")).unwrap();
+        raw["paths"]["adb_exe"] = serde_yaml::to_value(root.join("adb.exe")).unwrap();
+        raw["paths"]["mumu_instance"] = serde_yaml::to_value(0).unwrap();
+        raw["logging"]["dir"] = serde_yaml::to_value(root.join("logs")).unwrap();
+        raw["monitor"]["write_status_json"] = serde_yaml::Value::Bool(false);
+        fs::write(&path, serde_yaml::to_string(&raw).unwrap()).unwrap();
+        let mut watchdog = Watchdog::new(Settings::load(&path).unwrap()).unwrap();
+        watchdog.logwatch.manual_stopped = true;
+        watchdog.adb_fail = 2;
+        let started_at = watchdog.started_at;
+        raw["schedule"]["restart_interval_hours"] = serde_yaml::to_value(12).unwrap();
+        raw["schedule"]["restart_on_start"] = serde_yaml::Value::Bool(true);
+        raw["health"]["check_interval_seconds"] = serde_yaml::to_value(120).unwrap();
+        fs::write(&path, serde_yaml::to_string(&raw).unwrap()).unwrap();
+        watchdog.reload_config().unwrap();
+        assert_eq!(watchdog.settings.restart_interval_hours, 12.0);
+        assert_eq!(watchdog.settings.check_interval, 120);
+        assert_eq!(watchdog.emulator.instance, 0);
+        assert!(watchdog.pending_full_cycle.is_none());
+        assert!(watchdog.logwatch.manual_stopped);
+        assert_eq!(watchdog.adb_fail, 2);
+        assert_eq!(watchdog.started_at, started_at);
+        let next = watchdog.next_restart;
+        fs::write(&path, "health: {check_interval_seconds: broken}").unwrap();
+        assert!(watchdog.reload_config().is_err());
+        assert_eq!(watchdog.settings.check_interval, 120);
+        assert_eq!(watchdog.next_restart, next);
+        assert!(watchdog.logwatch.manual_stopped);
+        drop(watchdog);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -467,3 +467,25 @@ pub fn check_output(program: &str, args: &[&str]) -> Option<Output> {
         .output()
         .ok()
 }
+
+/// 把 panic 原因和后调用栈写入 crash.log：
+/// 窗口化进程没有控制台，否则异常退出的原因会完全丢失。
+pub fn install_panic_hook() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.set(()).is_err() {
+        return;
+    }
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = format!("panic: {info}");
+        log::error!("{message}");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let crash_path = crate::constants::wd_dir().join("crash.log");
+        let _ = std::fs::write(
+            &crash_path,
+            format!("{}\n{message}\n{backtrace}\n", now_text()),
+        );
+        default_hook(info);
+    }));
+}

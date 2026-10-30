@@ -1,4 +1,4 @@
-//! 系统集成：开机自启快捷方式、计划任务监督者（每 5 分钟 --ensure）。
+//! 系统集成：开机自启快捷方式、计划任务监督者（每 2 分钟 --ensure）。
 
 use std::path::Path;
 
@@ -69,7 +69,7 @@ pub fn install_supervisor() -> Result<(), String> {
             "/SC",
             "MINUTE",
             "/MO",
-            "5",
+            "2",
             "/TN",
             constants::SUPERVISOR_TASK_NAME,
             "/TR",

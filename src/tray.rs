@@ -18,11 +18,11 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage,
-    RegisterClassW, SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, CS_DBLCLKS,
-    IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, LoadImageW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, TrackPopupMenu,
+    TranslateMessage, CS_DBLCLKS, IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR,
+    MF_STRING, MSG, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
 use crate::constants;
@@ -102,12 +102,24 @@ impl Tray {
     }
 }
 
+impl Drop for Tray {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
-    OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(text)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn path_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn tray_thread(sender: mpsc::Sender<isize>) -> Result<(), String> {
@@ -197,6 +209,11 @@ fn copy_tip(destination: &mut [u16; 128], text: &[u16]) {
 
 fn load_tray_icon(instance: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
     unsafe {
+        // 图标资源 1 在构建时内嵌，部署时无需额外携带图标文件。
+        let embedded = LoadImageW(instance as _, 1usize as *const u16, IMAGE_ICON, 32, 32, 0);
+        if !embedded.is_null() {
+            return embedded;
+        }
         let icon_path = constants::wd_dir().join("icon.ico");
         let icon = LoadImageW(
             instance as _,
@@ -248,7 +265,7 @@ unsafe extern "system" fn wndproc(
             let event = (lparam as u32) & 0xFFFF;
             if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                 show_menu(hwnd);
-            } else if event == WM_LBUTTONDBLCLK {
+            } else if event == WM_LBUTTONUP {
                 open_console();
             }
             0
@@ -289,7 +306,7 @@ unsafe fn show_menu(hwnd: HWND) {
     append(menu, MF_STRING, MENU_RESTART_ALAS, "只重启 Alas");
     append(menu, MF_SEPARATOR, 0, "");
     append(menu, MF_STRING, MENU_OPEN_LOGS, "打开日志目录");
-    append(menu, MF_STRING, MENU_OPEN_CONFIG, "打开配置文件");
+    append(menu, MF_STRING, MENU_OPEN_CONFIG, "配置（控制台）");
     append(menu, MF_SEPARATOR, 0, "");
     append(menu, MF_STRING, MENU_EXIT, "退出看门狗");
 
@@ -322,9 +339,7 @@ unsafe fn show_menu(hwnd: HWND) {
                 .spawn();
         }
         MENU_OPEN_CONFIG => {
-            let _ = std::process::Command::new("notepad")
-                .arg(constants::config_path())
-                .spawn();
+            open_console();
         }
         MENU_EXIT => {
             let _ = std::fs::write(constants::flag_stop(), util::now_text());
@@ -334,6 +349,21 @@ unsafe fn show_menu(hwnd: HWND) {
 }
 
 fn open_console() {
+    // 已有控制台时恢复原窗口，避免重复启动。
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE};
+        let title = wide(&format!(
+            "{} v{} · MuMu + Alas 自动重启控制台",
+            constants::APP_NAME,
+            constants::VERSION
+        ));
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            return;
+        }
+    }
     let args = vec!["--gui".to_string()];
     let _ = util::spawn_process(
         constants::app_path(),

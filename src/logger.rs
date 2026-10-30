@@ -15,12 +15,13 @@ use crate::win32;
 struct LoggerState {
     file: Option<File>,
     date: String,
+    dir: PathBuf,
+    level: LevelFilter,
+    keep_days: u32,
 }
 
 pub struct FileLogger {
-    dir: PathBuf,
     console: bool,
-    level: LevelFilter,
     state: Mutex<LoggerState>,
 }
 
@@ -29,12 +30,13 @@ impl FileLogger {
         let _ = fs::create_dir_all(dir);
         util::prune_logs(dir, 14);
         FileLogger {
-            dir: dir.to_path_buf(),
             console,
-            level,
             state: Mutex::new(LoggerState {
                 file: None,
                 date: String::new(),
+                dir: dir.into(),
+                level,
+                keep_days: 14,
             }),
         }
     }
@@ -42,7 +44,10 @@ impl FileLogger {
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.level
+        self.state
+            .lock()
+            .map(|state| metadata.level() <= state.level)
+            .unwrap_or(false)
     }
 
     fn log(&self, record: &Record) {
@@ -63,9 +68,9 @@ impl Log for FileLogger {
         };
         if state.date != today || state.file.is_none() {
             state.date = today.clone();
-            let path = self.dir.join(format!("watchdog_{today}.log"));
+            let path = state.dir.join(format!("watchdog_{today}.log"));
             state.file = OpenOptions::new().create(true).append(true).open(path).ok();
-            util::prune_logs(&self.dir, 14);
+            util::prune_logs(&state.dir, state.keep_days);
         }
         if let Some(file) = state.file.as_mut() {
             let _ = writeln!(file, "{line}");
@@ -77,6 +82,35 @@ impl Log for FileLogger {
 }
 
 static LOGGER: std::sync::OnceLock<FileLogger> = std::sync::OnceLock::new();
+
+/// Prepare the destination before replacing any live logger state.
+pub fn reconfigure(dir: &Path, level: &str, keep_days: u32) -> Result<(), String> {
+    let level = match level.to_ascii_uppercase().as_str() {
+        "DEBUG" => LevelFilter::Debug,
+        "WARN" | "WARNING" => LevelFilter::Warn,
+        "ERROR" => LevelFilter::Error,
+        _ => LevelFilter::Info,
+    };
+    fs::create_dir_all(dir).map_err(|e| format!("日志目录不可用：{e}"))?;
+    let date = Local::now().format("%Y%m%d").to_string();
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("watchdog_{date}.log")))
+        .map_err(|e| format!("日志文件不可写：{e}"))?;
+    if let Some(logger) = LOGGER.get() {
+        let mut state = logger.state.lock().map_err(|e| e.to_string())?;
+        *state = LoggerState {
+            file: Some(file),
+            date,
+            dir: dir.into(),
+            level,
+            keep_days,
+        };
+        log::set_max_level(level);
+    }
+    Ok(())
+}
 
 pub fn init(dir: &Path, level: &str, console: bool) {
     let level_filter = match level.to_ascii_uppercase().as_str() {
@@ -96,6 +130,7 @@ pub fn init(dir: &Path, level: &str, console: bool) {
     if console_enabled {
         log::debug!("console logging enabled");
     }
+    util::install_panic_hook();
     let _ = constants::APP_NAME;
 }
 
