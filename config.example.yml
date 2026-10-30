@@ -3,7 +3,7 @@
 #
 # 首次运行会在同目录生成 config.yml（本文件的副本），然后读取 config.yml。
 # config.yml 已被 .gitignore 忽略，可以放心填写本机路径。
-# 修改 config.yml 后需要重启看门狗（--stop 然后 --start）才生效。
+# 修改后可在 GUI「配置」页保存并请求后台热重载，或重启看门狗后生效。
 # 路径建议使用正斜杠 / ；auto 表示自动识别。
 # ============================================================================
 
@@ -81,7 +81,7 @@ monitor:
   # 是否写 status.json。
   write_status_json: true
   # 以下自我监控阈值用于超长时间无人值守：超过阈值且已安装监督者任务时，
-  # 看门狗会记录日志并有序退出，由计划任务（--ensure 每 5 分钟）重新拉起。
+  # 看门狗会记录日志并有序退出，由计划任务（--ensure 每 2 分钟）重新拉起。
   self_restart_memory_mb: 200
   self_restart_handles: 1000
   self_restart_after_hours: 24
