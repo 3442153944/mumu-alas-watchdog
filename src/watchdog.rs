@@ -577,6 +577,13 @@ impl Watchdog {
             }
         }
         status::write_status(&self.settings, &payload);
+        let tip = format!(
+            "MuMu + Alas 看门狗（运行中） | 下次重启: {}",
+            self.next_restart
+                .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "尚未安排".to_string())
+        );
+        crate::tray::set_tip(&tip);
         self.check_self_restart(&payload);
     }
 
@@ -901,11 +908,21 @@ pub fn run_daemon(settings: Settings) -> Result<(), String> {
         outln!("MuMuAlasWatchdog 已经在运行，本次不重复启动");
         return Ok(());
     };
+    let mut tray = match crate::tray::Tray::start("MuMu + Alas 看门狗（运行中）") {
+        Ok(tray) => Some(tray),
+        Err(err) => {
+            log::warn!("托盘图标初始化失败（后台仍会运行）: {err}");
+            None
+        }
+    };
     let result = (|| -> Result<(), String> {
         let mut watchdog = Watchdog::new(settings)?;
         watchdog.run();
         Ok(())
     })();
+    if let Some(tray) = tray.as_mut() {
+        tray.shutdown();
+    }
     release_pid_lock(Some(lock));
     result
 }

@@ -13,6 +13,7 @@ pub mod logwatch;
 pub mod output;
 pub mod schedule;
 pub mod status;
+pub mod tray;
 pub mod util;
 pub mod watchdog;
 pub mod win32;
